@@ -10,6 +10,9 @@ import CopyEditor from "@/components/listing/CopyEditor";
 import ExportButton from "@/components/listing/ExportButton";
 import type { ListingCopy, ListingStatus } from "@/types";
 
+// Give up polling after this long in 'processing' (pipeline likely died).
+const STALL_MS = 6 * 60 * 1000; // 6 minutes
+
 interface StatusResponse {
   status: ListingStatus;
   product_name: string | null;
@@ -57,6 +60,9 @@ export default function ListingPage({
   const [data, setData] = useState<StatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Stop polling if generation appears stuck (e.g. the serverless function was
+  // killed mid-pipeline and the listing never leaves 'processing').
+  const startedAt = useRef(Date.now());
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -66,6 +72,11 @@ export default function ListingPage({
       setData(json);
       if (json.status === "complete" || json.status === "error") {
         if (timer.current) clearInterval(timer.current);
+      } else if (Date.now() - startedAt.current > STALL_MS) {
+        if (timer.current) clearInterval(timer.current);
+        setError(
+          "This is taking longer than expected. Your results may still finish — refresh in a few minutes. If nothing appears, the generation likely failed."
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load listing");

@@ -52,7 +52,6 @@ export default function NewListingPage() {
   const [detected, setDetected] = useState<Detected | null>(null);
   const [confirmedName, setConfirmedName] = useState("");
   const [confirmedCategory, setConfirmedCategory] = useState("");
-  const [gender, setGender] = useState<"male" | "female">("female");
 
   const [error, setError] = useState<string | null>(null);
   const [detecting, setDetecting] = useState(false);
@@ -134,7 +133,6 @@ export default function NewListingPage() {
           productName: confirmedName,
           category: confirmedCategory,
           keywords,
-          gender,
         }),
       });
       const data = await res.json();
@@ -276,31 +274,10 @@ export default function NewListingPage() {
                   value={confirmedCategory}
                   onChange={(e) => setConfirmedCategory(e.target.value)}
                 />
-
-                <div>
-                  <label className="mb-1.5 block text-sm font-medium text-navy">
-                    Lifestyle style
-                  </label>
-                  <div className="grid grid-cols-2 gap-3">
-                    {(["female", "male"] as const).map((g) => (
-                      <button
-                        key={g}
-                        type="button"
-                        onClick={() => setGender(g)}
-                        className={`h-11 rounded-xl border text-sm font-medium capitalize transition-colors ${
-                          gender === g
-                            ? "border-indigo bg-indigo text-white"
-                            : "border-slate-300 bg-white text-navy hover:border-indigo"
-                        }`}
-                      >
-                        {g}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-1.5 text-xs text-slate-400">
-                    Picks 3 lifestyle scenes from the {gender} prompt set.
-                  </p>
-                </div>
+                <p className="text-xs text-slate-400">
+                  We&apos;ll create a clean white-background image plus 4
+                  lifestyle scenes picked from a varied set of 20 styles.
+                </p>
               </div>
             </Card>
 

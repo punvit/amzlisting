@@ -1,18 +1,22 @@
 // POST /api/generate
 // Body: { imageDataUrl, productName, category, keywords }
 //
-// 1. Auth + credit check (intercept BEFORE any work if credits === 0).
-// 2. Deduct 1 credit, upload original to Supabase Storage, create the listing
-//    row with status 'processing', and return { listingId } immediately.
+// 1. Auth check, then ATOMIC credit deduction via the consume_credit() RPC
+//    (race-free; fails cleanly at 0 credits).
+// 2. Upload original to Supabase Storage, create the listing row with status
+//    'processing', and return { listingId } immediately.
 // 3. Run the pipeline (Remove.bg -> FAL x4 lifestyle -> Claude copy) kept alive
 //    via waitUntil, updating the DB as it progresses. Client polls /api/status.
+//
+// Refunds (upload failure, listing-insert failure, pipeline crash) go through
+// the server-only refund_credit() RPC using the service-role client.
 
 import { NextResponse, type NextRequest } from "next/server";
 import { waitUntil } from "@vercel/functions";
 import { createSupabaseServerClient, createSupabaseAdminClient } from "@/lib/supabase";
 import { uploadImage } from "@/lib/storage";
 import { removeBackground } from "@/lib/removebg";
-import { generateLifestyleImage, pickLifestylePrompts, type Gender } from "@/lib/fal";
+import { generateLifestyleImage, pickLifestylePrompts } from "@/lib/fal";
 import { generateCopy } from "@/lib/anthropic";
 
 // Hobby plan caps function duration at 60s; bump this if you're on Vercel Pro.
@@ -32,7 +36,6 @@ export async function POST(request: NextRequest) {
     productName?: string;
     category?: string;
     keywords?: string;
-    gender?: string;
   };
   try {
     body = await request.json();
@@ -41,7 +44,6 @@ export async function POST(request: NextRequest) {
   }
 
   const { imageDataUrl, productName, category, keywords } = body;
-  const gender: Gender = body.gender === "female" ? "female" : "male";
   if (!imageDataUrl || !imageDataUrl.startsWith("data:image/")) {
     return NextResponse.json({ error: "A product image is required" }, { status: 400 });
   }
@@ -49,28 +51,26 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Product name is required" }, { status: 400 });
   }
 
-  // --- Credit check (before any work) ---
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("credits_remaining")
-    .eq("id", user.id)
-    .single();
-
-  if (!profile || profile.credits_remaining < 1) {
+  // --- Atomically consume 1 credit (before any work) ---
+  // consume_credit() deducts only if a credit is available and returns the new
+  // balance; NULL means the user had no credits (or no profile row).
+  const { data: newBalance, error: creditError } = await supabase.rpc("consume_credit");
+  if (creditError) {
+    console.error("consume_credit failed:", creditError);
+    return NextResponse.json({ error: "Could not reserve a credit" }, { status: 500 });
+  }
+  if (newBalance === null || newBalance === undefined) {
     return NextResponse.json(
       { error: "You're out of credits.", code: "no_credits" },
       { status: 402 }
     );
   }
 
-  // --- Deduct 1 credit ---
-  const { error: creditError } = await supabase
-    .from("profiles")
-    .update({ credits_remaining: profile.credits_remaining - 1 })
-    .eq("id", user.id);
-  if (creditError) {
-    return NextResponse.json({ error: "Could not reserve a credit" }, { status: 500 });
-  }
+  const admin = createSupabaseAdminClient();
+  const refundCredit = async () => {
+    const { error } = await admin.rpc("refund_credit", { p_user_id: user.id });
+    if (error) console.error("refund_credit failed:", error);
+  };
 
   // --- Upload original + create listing ---
   let originalUrl: string;
@@ -78,11 +78,7 @@ export async function POST(request: NextRequest) {
     originalUrl = await uploadImage(imageDataUrl, "listinglab/originals");
   } catch (err) {
     console.error("original upload failed:", err);
-    // refund the credit
-    await supabase
-      .from("profiles")
-      .update({ credits_remaining: profile.credits_remaining })
-      .eq("id", user.id);
+    await refundCredit();
     return NextResponse.json({ error: "Could not upload image" }, { status: 500 });
   }
 
@@ -98,10 +94,7 @@ export async function POST(request: NextRequest) {
     .single();
 
   if (listingError || !listing) {
-    await supabase
-      .from("profiles")
-      .update({ credits_remaining: profile.credits_remaining })
-      .eq("id", user.id);
+    await refundCredit();
     return NextResponse.json({ error: "Could not create listing" }, { status: 500 });
   }
 
@@ -111,11 +104,11 @@ export async function POST(request: NextRequest) {
   // running anyway).
   const pipeline = runPipeline({
     listingId: listing.id,
+    userId: user.id,
     originalUrl,
     productName: productName.trim(),
     category: category?.trim() || "General",
     keywords: keywords?.trim() || "",
-    gender,
   }).catch((err) => console.error("pipeline crashed:", err));
 
   try {
@@ -133,14 +126,14 @@ export async function POST(request: NextRequest) {
 // ---------------------------------------------------------------------------
 async function runPipeline(args: {
   listingId: string;
+  userId: string;
   originalUrl: string;
   productName: string;
   category: string;
   keywords: string;
-  gender: Gender;
 }) {
   const admin = createSupabaseAdminClient();
-  const { listingId, originalUrl, productName, category, keywords, gender } = args;
+  const { listingId, userId, originalUrl, productName, category, keywords } = args;
 
   try {
     // STEP A — Background removal
@@ -160,12 +153,12 @@ async function runPipeline(args: {
       image_url: whiteBgUrl,
     });
 
-    // STEP B — Lifestyle images (4). Retry each once, continue on failure.
+    // STEP B — Lifestyle images (4). A random mix drawn from the combined
+    // male + female prompt pools (20 prompts). Retry each once, continue on
+    // failure. Run in parallel so the whole pipeline fits within the function
+    // timeout; a failure on one never affects the others or the copy.
     const types = ["lifestyle_1", "lifestyle_2", "lifestyle_3", "lifestyle_4"] as const;
-    const prompts = pickLifestylePrompts(gender, 4);
-    // Run the 4 images in parallel so the whole pipeline fits within the
-    // function timeout. Each is generated + stored + recorded independently
-    // (retried once); a failure on one never affects the others or the copy.
+    const prompts = pickLifestylePrompts(4);
     await Promise.all(
       prompts.map(async (prompt, i) => {
         for (let attempt = 0; attempt < 2; attempt++) {
@@ -179,7 +172,7 @@ async function runPipeline(args: {
             });
             return; // success
           } catch (err) {
-            console.error(`Lifestyle attempt ${attempt + 1} failed (${gender} #${i + 1}):`, err);
+            console.error(`Lifestyle attempt ${attempt + 1} failed (#${i + 1}):`, err);
           }
         }
       })
@@ -203,5 +196,8 @@ async function runPipeline(args: {
   } catch (err) {
     console.error("pipeline error:", err);
     await admin.from("listings").update({ status: "error" }).eq("id", listingId);
+    // The generation failed — give the credit back.
+    const { error: refundError } = await admin.rpc("refund_credit", { p_user_id: userId });
+    if (refundError) console.error("pipeline refund failed:", refundError);
   }
 }

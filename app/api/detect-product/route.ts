@@ -6,6 +6,25 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createSupabaseServerClient } from "@/lib/supabase";
 import { detectProduct } from "@/lib/anthropic";
 
+// Lightweight per-user rate limit so authenticated users can't loop this
+// endpoint and burn the Anthropic budget (detection is free / uncredited).
+// NOTE: in-memory, so it's per serverless instance — a basic first line of
+// defense, not a hard guarantee. For strict limits use Upstash/Redis.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX = 10; // requests per user per minute
+const rateHits = new Map<string, { count: number; windowStart: number }>();
+
+function isRateLimited(userId: string): boolean {
+  const now = Date.now();
+  const entry = rateHits.get(userId);
+  if (!entry || now - entry.windowStart > RATE_WINDOW_MS) {
+    rateHits.set(userId, { count: 1, windowStart: now });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > RATE_MAX;
+}
+
 export async function POST(request: NextRequest) {
   // Require an authenticated user.
   const supabase = createSupabaseServerClient();
@@ -14,6 +33,13 @@ export async function POST(request: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  if (isRateLimited(user.id)) {
+    return NextResponse.json(
+      { error: "Too many requests. Please wait a minute and try again." },
+      { status: 429 }
+    );
   }
 
   let imageDataUrl: string | undefined;

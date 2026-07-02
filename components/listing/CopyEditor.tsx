@@ -43,6 +43,7 @@ export default function CopyEditor({
   const [fields, setFields] = useState<EditableFields>(toFields(copy));
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skippedInitialSave = useRef(false);
 
   const save = useCallback(
     async (patch: Partial<EditableFields>) => {
@@ -62,8 +63,13 @@ export default function CopyEditor({
     [listingId]
   );
 
-  // Debounced auto-save whenever fields change.
+  // Debounced auto-save whenever fields change (skip the initial mount —
+  // nothing has changed yet).
   useEffect(() => {
+    if (!skippedInitialSave.current) {
+      skippedInitialSave.current = true;
+      return;
+    }
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => save(fields), 800);
     return () => {

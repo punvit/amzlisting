@@ -94,14 +94,15 @@ alter table public.listings       enable row level security;
 alter table public.listing_images enable row level security;
 alter table public.listing_copy   enable row level security;
 
--- profiles: a user can read/update only their own row
+-- profiles: a user can READ only their own row. There is intentionally NO
+-- update policy — plan/credits changes go through the security-definer
+-- functions below or the service-role client (webhooks). A direct client
+-- update policy would let users set their own plan/credits.
 drop policy if exists "profiles_select_own" on public.profiles;
 create policy "profiles_select_own" on public.profiles
   for select using (auth.uid() = id);
 
 drop policy if exists "profiles_update_own" on public.profiles;
-create policy "profiles_update_own" on public.profiles
-  for update using (auth.uid() = id);
 
 -- listings: owner-only access
 drop policy if exists "listings_select_own" on public.listings;
@@ -167,6 +168,46 @@ create policy "listing_copy_modify_own" on public.listing_copy
       where l.id = listing_copy.listing_id and l.user_id = auth.uid()
     )
   );
+
+-- ============================================================
+-- Credit functions (atomic, race-free)
+-- ============================================================
+
+-- Deducts exactly 1 credit for the calling user if available.
+-- Returns the new balance, or NULL when out of credits.
+create or replace function public.consume_credit()
+returns integer
+language sql
+security definer
+set search_path = public
+as $$
+  update public.profiles
+     set credits_remaining = credits_remaining - 1
+   where id = auth.uid()
+     and credits_remaining > 0
+  returning credits_remaining;
+$$;
+
+revoke all on function public.consume_credit() from public;
+grant execute on function public.consume_credit() to authenticated;
+
+-- Refunds 1 credit. SERVER ONLY (service role) — users must never be
+-- able to call this, or they could mint free credits.
+create or replace function public.refund_credit(p_user_id uuid)
+returns integer
+language sql
+security definer
+set search_path = public
+as $$
+  update public.profiles
+     set credits_remaining = credits_remaining + 1
+   where id = p_user_id
+  returning credits_remaining;
+$$;
+
+revoke all on function public.refund_credit(uuid) from public;
+revoke execute on function public.refund_credit(uuid) from anon, authenticated;
+grant execute on function public.refund_credit(uuid) to service_role;
 
 -- ============================================================
 -- NOTE: The generation pipeline / webhooks write to these tables
