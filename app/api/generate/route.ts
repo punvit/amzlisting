@@ -16,8 +16,8 @@ import { waitUntil } from "@vercel/functions";
 import { createSupabaseServerClient, createSupabaseAdminClient } from "@/lib/supabase";
 import { uploadImage } from "@/lib/storage";
 import { removeBackground } from "@/lib/removebg";
-import { generateLifestyleImage, pickLifestylePrompts } from "@/lib/fal";
-import { generateCopy } from "@/lib/anthropic";
+import { generateLifestyleImage, pickLifestylePrompts, PRODUCT_LOCK } from "@/lib/fal";
+import { generateCopy, generateLifestylePrompts } from "@/lib/anthropic";
 
 // Hobby plan caps function duration at 60s; bump this if you're on Vercel Pro.
 export const maxDuration = 60;
@@ -136,6 +136,21 @@ async function runPipeline(args: {
   const { listingId, userId, originalUrl, productName, category, keywords } = args;
 
   try {
+    // STEP 0 — Product-aware lifestyle prompts. Claude writes 4 scene prompts
+    // tailored to THIS product (a water bottle gets gym/hiking scenes, a phone
+    // case gets desk/café scenes, etc.). Runs in parallel with background
+    // removal so it adds no latency. Falls back to the static 20-prompt pool.
+    const promptsPromise: Promise<string[]> = generateLifestylePrompts({
+      productName,
+      category,
+      keywords,
+    })
+      .then((scenes) => scenes.map((s) => s + PRODUCT_LOCK))
+      .catch((err) => {
+        console.error("AI prompt generation failed, using static pool:", err);
+        return pickLifestylePrompts(4);
+      });
+
     // STEP A — Background removal
     const cleanPngDataUrl = await removeBackground(originalUrl);
     const whiteBgUrl = await uploadImage(
@@ -153,12 +168,12 @@ async function runPipeline(args: {
       image_url: whiteBgUrl,
     });
 
-    // STEP B — Lifestyle images (4). A random mix drawn from the combined
-    // male + female prompt pools (20 prompts). Retry each once, continue on
+    // STEP B — Lifestyle images (4), using the product-aware prompts from
+    // STEP 0 (or the static pool if that failed). Retry each once, continue on
     // failure. Run in parallel so the whole pipeline fits within the function
     // timeout; a failure on one never affects the others or the copy.
     const types = ["lifestyle_1", "lifestyle_2", "lifestyle_3", "lifestyle_4"] as const;
-    const prompts = pickLifestylePrompts(4);
+    const prompts = await promptsPromise;
     await Promise.all(
       prompts.map(async (prompt, i) => {
         for (let attempt = 0; attempt < 2; attempt++) {

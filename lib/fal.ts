@@ -12,7 +12,8 @@ fal.config({ credentials: process.env.FAL_KEY });
 
 // Shared instruction appended to every scene prompt: keeps the product
 // identical to the reference image and enforces Amazon-catalog quality.
-const PRODUCT_LOCK =
+// Exported so AI-generated scene prompts (lib/anthropic.ts) get the same lock.
+export const PRODUCT_LOCK =
   " Keep the exact product from the reference image completely unchanged — same shape, colors, design, text, and materials. The product must be the clear focal point, sharp and well-lit. Photorealistic, premium quality, suitable for an Amazon product listing.";
 
 export const MALE_PROMPTS = [

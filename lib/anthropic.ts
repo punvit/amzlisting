@@ -75,6 +75,55 @@ export async function detectProduct(
   };
 }
 
+// Generates 4 lifestyle scene prompts tailored to the specific product, for
+// use with the FLUX Kontext image editor. Returns scene descriptions WITHOUT
+// the product-lock suffix — the caller appends PRODUCT_LOCK from lib/fal.ts.
+// Throws on failure; callers should fall back to the static prompt pool.
+export async function generateLifestylePrompts(args: {
+  productName: string;
+  category: string;
+  keywords: string;
+}): Promise<string[]> {
+  const client = getClient();
+  const message = await client.messages.create({
+    model: MODEL,
+    max_tokens: 900,
+    system:
+      "You write scene prompts for an AI image editor that places a product " +
+      "photo into realistic lifestyle scenes for Amazon listings. The editor " +
+      "receives a reference image of the product on a white background and " +
+      "rebuilds the scene around it. Rules for every prompt: refer to the item " +
+      "only as 'the product from the reference image'; NEVER describe, name, " +
+      "or alter the product itself; describe only the scene, props, surface, " +
+      "people (if any), lighting, and mood; 2-3 sentences each; scenes must " +
+      "make sense for where and how this specific product is actually used.",
+    messages: [
+      {
+        role: "user",
+        content:
+          `Product: ${args.productName}. Category: ${args.category}. ` +
+          (args.keywords ? `Keywords: ${args.keywords}. ` : "") +
+          "Write 4 DIVERSE lifestyle scene prompts for this product: " +
+          "1) a styled flatlay or tabletop composition with complementary props, " +
+          "2) a person naturally holding or using the product, " +
+          "3) the product in the environment where it is typically used, " +
+          "4) a premium aesthetic composition with strong mood lighting. " +
+          "Vary the demographics/settings naturally across the four. " +
+          'Return ONLY JSON: {"prompts": ["...", "...", "...", "..."]}.',
+      },
+    ],
+  });
+
+  const parsed = parseJsonObject<{ prompts?: unknown }>(getTextBlock(message));
+  const prompts = Array.isArray(parsed.prompts)
+    ? parsed.prompts.filter((p): p is string => typeof p === "string" && p.trim().length > 20)
+    : [];
+  if (prompts.length < 4) {
+    throw new Error(`Expected 4 lifestyle prompts, got ${prompts.length}`);
+  }
+  return prompts.slice(0, 4);
+}
+
 export interface GeneratedCopy {
   title: string;
   bullets: string[];

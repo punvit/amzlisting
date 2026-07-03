@@ -28,7 +28,11 @@ as $$
 $$;
 
 revoke all on function public.consume_credit() from public;
+revoke execute on function public.consume_credit() from anon;
 grant execute on function public.consume_credit() to authenticated;
+
+-- The signup trigger function should not be callable via the REST API.
+revoke execute on function public.handle_new_user() from anon, authenticated, public;
 
 -- 3. Credit refund — SERVER ONLY (service role). Users must never be
 --    able to call this, or they could mint free credits.

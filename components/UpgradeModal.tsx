@@ -60,14 +60,44 @@ export default function UpgradeModal({
         name: "ListingLab",
         description: `${PAID_PLANS[plan].name} plan`,
         theme: { color: "#6366F1" },
-        handler: () => {
-          setMessage(
-            "Payment received! Your credits will update in a few seconds."
-          );
-          setTimeout(() => {
-            router.refresh();
-            onClose();
-          }, 4000);
+        modal: {
+          // User closed the checkout without paying.
+          ondismiss: () => setLoading(null),
+        },
+        handler: async (response: {
+          razorpay_payment_id: string;
+          razorpay_subscription_id: string;
+          razorpay_signature: string;
+        }) => {
+          // Verify the payment signature server-side, then activate the plan.
+          try {
+            const verifyRes = await fetch("/api/razorpay/verify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(response),
+            });
+            const verifyData = await verifyRes.json();
+            if (!verifyRes.ok) {
+              throw new Error(verifyData.error || "Verification failed");
+            }
+            setMessage(
+              `Payment verified! Your ${PAID_PLANS[plan].name} plan is active with ${verifyData.credits} credits.`
+            );
+            setTimeout(() => {
+              router.refresh();
+              onClose();
+            }, 2500);
+          } catch {
+            // Payment went through but verification failed — the webhook will
+            // still activate the plan within a minute or two.
+            setMessage(
+              "Payment received! Your plan will activate within a couple of minutes."
+            );
+            setTimeout(() => {
+              router.refresh();
+              onClose();
+            }, 5000);
+          }
         },
       });
       rzp.on("payment.failed", () => setError("Payment failed. Please try again."));
